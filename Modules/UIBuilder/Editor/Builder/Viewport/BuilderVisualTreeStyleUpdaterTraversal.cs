@@ -69,11 +69,7 @@ namespace Unity.UI.Builder
         public override void TraverseRecursive(VisualElement element, int depth)
         {
             // Skip if element is neither dirty nor ancestor of dirty
-            // Note: We check parent.stylesDirty because children inherit from parent and need updating
-            var parent = element.hierarchy.parent;
-            bool isDirty = element.stylesDirty || (parent != null && parent.stylesDirty);
-
-            if (!element.stylesAncestorOfDirty && !isDirty)
+            if (!NeedsStyleTraversal(element))
             {
                 return;
             }

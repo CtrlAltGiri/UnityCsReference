@@ -87,10 +87,15 @@ namespace UnityEngine.UIElements
         DisabledSelf = 1L << 22,
         // Element style have been initialized, so transitions can be applied to it when it changes next time
         StyleInitialized = 1L << 23,
-        // Element styles need to be updated, implicitly applies to all its descendants
-        StyleDirty = 1L << 24,
-        // Element is an ancestor of an element with StylesDirty flag, but doesn't need to be updated itself
+        // Element styles need to be updated, implicitly applies to all its descendants (StyleDirtyFlags.Subtree)
+        StyleSubtreeDirty = 1L << 24,
+        // Element is an ancestor of an element with a style dirty flag, but doesn't need to be updated itself
         StyleAncestorOfDirty = 1L << 25,
+        // Element styles need to be updated, but not its descendants' (StyleDirtyFlags.Self)
+        StyleSelfDirty = 1L << 15,
+        // Element has a pending descendant invalidation set (StyleDirtyFlags.HasPendingSet)
+        StylePendingSetDirty = 1L << 16,
+        StyleDirtyMask = StyleSubtreeDirty | StyleSelfDirty | StylePendingSetDirty,
         // 2-bit encoding of the LanguageDirection set on the element
         LanguageDirectionMask = 3L << VisualElementFlagsShift.LanguageDirection,
         // 2-bit encoding of the LanguageDirection resolved from the ancestors
@@ -111,7 +116,7 @@ namespace UnityEngine.UIElements
             EligibleToReceiveFocusFromDisabledChild
     }
 
-    // Free bits: 15, 16, 17, 30, 31, and 51 upwards.
+    // Free bits: 17, 30, 31, and 51 upwards.
     internal static class VisualElementFlagsShift
     {
         public const int LanguageDirection = 26;
@@ -1643,8 +1648,9 @@ namespace UnityEngine.UIElements
         {
             if ((m_Flags & VisualElementFlags.Released) != 0)
                 throw new InvalidOperationException(k_ElementReleaseExceptionMessage);
+            int oldNameId = m_SelectorDataPtr->nameId;
             m_SelectorDataPtr->nameId = nameId;
-            IncrementVersion(VersionChangeType.StyleSheet | VersionChangeType.Name);
+            IncrementStyleFeatureVersion(stackalloc int[] { oldNameId, nameId }, VersionChangeType.Name);
             NotifyPropertyChanged(nameProperty);
         }
 
@@ -2037,10 +2043,30 @@ namespace UnityEngine.UIElements
         }
 
         [VisibleToOtherModules("UnityEditor.UIBuilderModule")]
-        internal bool stylesDirty
+        internal StyleDirtyFlags styleDirtyFlags
         {
-            get => (m_Flags & VisualElementFlags.StyleDirty) == VisualElementFlags.StyleDirty;
-            set => m_Flags = value ? m_Flags | VisualElementFlags.StyleDirty : m_Flags & ~VisualElementFlags.StyleDirty;
+            get
+            {
+                var flags = StyleDirtyFlags.None;
+                if ((m_Flags & VisualElementFlags.StyleSelfDirty) != 0)
+                    flags |= StyleDirtyFlags.Self;
+                if ((m_Flags & VisualElementFlags.StyleSubtreeDirty) != 0)
+                    flags |= StyleDirtyFlags.Subtree;
+                if ((m_Flags & VisualElementFlags.StylePendingSetDirty) != 0)
+                    flags |= StyleDirtyFlags.HasPendingSet;
+                return flags;
+            }
+            set
+            {
+                var flags = m_Flags & ~VisualElementFlags.StyleDirtyMask;
+                if ((value & StyleDirtyFlags.Self) != 0)
+                    flags |= VisualElementFlags.StyleSelfDirty;
+                if ((value & StyleDirtyFlags.Subtree) != 0)
+                    flags |= VisualElementFlags.StyleSubtreeDirty;
+                if ((value & StyleDirtyFlags.HasPendingSet) != 0)
+                    flags |= VisualElementFlags.StylePendingSetDirty;
+                m_Flags = flags;
+            }
         }
 
         [VisibleToOtherModules("UnityEditor.UIBuilderModule")]
@@ -2449,7 +2475,7 @@ namespace UnityEngine.UIElements
 
             // styles are dependent on topology
             styleInitialized = false;
-            stylesDirty = false;
+            styleDirtyFlags = StyleDirtyFlags.None;
             stylesAncestorOfDirty = false;
             IncrementVersion(VersionChangeType.StyleSheet | VersionChangeType.Layout | VersionChangeType.Transform);
 
@@ -2488,6 +2514,13 @@ namespace UnityEngine.UIElements
         internal void IncrementVersion(VersionChangeType changeType)
         {
             elementPanel?.OnVersionChanged(this, changeType);
+        }
+
+        // StyleSheet version change caused by a name or class change, so the style updater can restrict
+        // invalidation to the elements that selectors referencing changedIds can match.
+        internal void IncrementStyleFeatureVersion(ReadOnlySpan<int> changedIds, VersionChangeType additionalChangeType = 0)
+        {
+            elementPanel?.OnStyleFeaturesChanged(this, changedIds, VersionChangeType.StyleSheet | additionalChangeType);
         }
 
         internal void InvokeHierarchyChanged(HierarchyChangeType changeType, IReadOnlyList<VisualElement> additionalContext = null) { elementPanel?.InvokeHierarchyChanged(this, changeType, additionalContext); }
@@ -3243,11 +3276,14 @@ namespace UnityEngine.UIElements
         /// </remarks>
         public void ClearClassList()
         {
-            if (m_ClassList.Count > 0)
+            var count = m_ClassList.Count;
+            if (count > 0)
             {
+                Span<int> removedIds = count <= 64 ? stackalloc int[count] : new int[count];
+                m_ClassList.GetClassIds().CopyTo(removedIds);
                 m_ClassList.Clear();
                 UpdateClassSelectorData();
-                IncrementVersion(VersionChangeType.StyleSheet);
+                IncrementStyleFeatureVersion(removedIds);
             }
         }
 
@@ -3285,7 +3321,7 @@ namespace UnityEngine.UIElements
             if (added)
             {
                 UpdateClassSelectorData();
-                IncrementVersion(VersionChangeType.StyleSheet);
+                IncrementStyleFeatureVersion(stackalloc int[] { className.id });
             }
         }
 
@@ -3318,7 +3354,7 @@ namespace UnityEngine.UIElements
             if (added)
             {
                 UpdateClassSelectorData();
-                IncrementVersion(VersionChangeType.StyleSheet);
+                IncrementStyleFeatureVersion(stackalloc int[] { className.id, className2.id });
             }
         }
 
@@ -3368,7 +3404,11 @@ namespace UnityEngine.UIElements
             if (added)
             {
                 UpdateClassSelectorData();
-                IncrementVersion(VersionChangeType.StyleSheet);
+                var count = classNames.Length;
+                Span<int> addedIds = count <= 64 ? stackalloc int[count] : new int[count];
+                for (var i = 0; i < count; i++)
+                    addedIds[i] = classNames[i].id;
+                IncrementStyleFeatureVersion(addedIds);
             }
         }
 
@@ -3394,7 +3434,7 @@ namespace UnityEngine.UIElements
             if (removed)
             {
                 UpdateClassSelectorData();
-                IncrementVersion(VersionChangeType.StyleSheet);
+                IncrementStyleFeatureVersion(stackalloc int[] { className.id });
             }
         }
 
@@ -3425,7 +3465,7 @@ namespace UnityEngine.UIElements
         {
             m_ClassList.Toggle(className);
             UpdateClassSelectorData();
-            IncrementVersion(VersionChangeType.StyleSheet);
+            IncrementStyleFeatureVersion(stackalloc int[] { className.id });
         }
 
         /// <summary>
@@ -3459,7 +3499,7 @@ namespace UnityEngine.UIElements
             if (changed)
             {
                 UpdateClassSelectorData();
-                IncrementVersion(VersionChangeType.StyleSheet);
+                IncrementStyleFeatureVersion(stackalloc int[] { className.id });
             }
         }
 
