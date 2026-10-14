@@ -2333,8 +2333,10 @@ namespace UnityEngine.UIElements
                     foreach (var e in elements)
                     {
                         e.elementPanel?.MemberElementsByHandle.Remove(e.layoutNode.Handle);
+                        e.elementPanel?.styleInvalidationIndex.RemoveElement(e);
                         e.elementPanel = p;
                         e.elementPanel?.MemberElementsByHandle.Add(e.layoutNode.Handle, e);
+                        e.elementPanel?.styleInvalidationIndex.AddElement(e);
 
                         e.flags |= flagToAdd;
                         e.m_CachedNextParentWithEventInterests = null;

@@ -457,6 +457,7 @@ namespace UnityEngine.UIElements
             while (iterator.MoveNext())
             {
                 var panel = iterator.Current.Value;
+                panel.styleInvalidationIndex.MarkDirty();
                 panel.liveReloadSystem.OnStyleSheetChanged(styleSheets);
                 panel.liveReloadSystem.OnStyleSheetChanged(styleSheetPaths);
             }

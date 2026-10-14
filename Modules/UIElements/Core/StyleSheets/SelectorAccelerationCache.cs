@@ -266,6 +266,9 @@ unsafe struct SelectorAccelerationCacheEntry
     // For reverse lookup
     internal StyleSheet ownerStyleSheet;
 
+    // Shares the entry's lifetime: rebuilt whenever the entry is.
+    internal StyleInvalidationData invalidationData;
+
     // Used for early rejection of lookups
     internal int nonEmptyTablesMask
     {
@@ -364,6 +367,7 @@ class SelectorAccelerationCache
         m_DependencyList.Clear();
         m_PathList.Clear();
         m_CacheForHash.Clear();
+        StyleInvalidationData.IncrementGeneration();
     }
 
     private static readonly ProfilerMarker s_MarkerBuild = new ProfilerMarker("UIElements.BuildAccelerateSelectors");
@@ -418,6 +422,7 @@ class SelectorAccelerationCache
         if (!m_Cache.Remove(entityId, out var entry))
             return false;
         entry.Free();
+        StyleInvalidationData.IncrementGeneration();
         return true;
     }
 
@@ -566,6 +571,7 @@ class SelectorAccelerationCache
 
                 // Build flattened cache
                 SelectorAccelerationCacheBuilder.BuildFlattenedCache(ref entry, styleSheet);
+                entry.invalidationData = StyleInvalidationData.Build(styleSheet);
 
                 m_Cache.Add(entityId, entry);
             }

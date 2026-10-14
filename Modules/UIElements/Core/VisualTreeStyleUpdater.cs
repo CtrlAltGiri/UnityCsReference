@@ -150,6 +150,7 @@ namespace UnityEngine.UIElements
             try
             {
                 m_LastVersion = m_Version;
+                panel?.styleInvalidationIndex.Refresh();
                 ApplyStyles();
 
                 var animSystem = panel?.GetUpdater(VisualTreeUpdatePhase.Animation) as VisualElementAnimationSystem;
