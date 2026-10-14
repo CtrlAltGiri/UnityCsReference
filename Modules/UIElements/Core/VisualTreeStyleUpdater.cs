@@ -328,6 +328,8 @@ namespace UnityEngine.UIElements
         private readonly Stack<PendingInvalidationSet> m_PendingSetPool = new Stack<PendingInvalidationSet>();
         // Sets of the ancestors on the current traversal path, pushed and popped with the ancestor filter.
         private readonly List<PendingInvalidationSet> m_ActivePendingSets = new List<PendingInvalidationSet>();
+        // Inherited data of the element being Self re-matched, held until it is compared with the new one.
+        private StyleDataRef<InheritedData> m_PreviousInheritedData;
 
         StyleMatchingContext m_StyleMatchingContext = new StyleMatchingContext(applyPseudoMasks: true);
         StylePropertyReader m_StylePropertyReader = new StylePropertyReader();
@@ -369,6 +371,7 @@ namespace UnityEngine.UIElements
                     foreach (var set in m_PendingSets.Values)
                         ReturnPendingSet(set);
                     m_PendingSets.Clear();
+                    m_PreviousInheritedData.SafeRelease();
 
                     // Set flag to false before dispatching events - user callbacks can directly modify elements
                     m_IsApplyingStyles = false;
@@ -584,8 +587,14 @@ namespace UnityEngine.UIElements
                     previousDependencyPseudoMask = selectorData.dependencyPseudoMask;
                 }
             }
-            int previousInheritedStylesHash = element.inheritedStylesHash;
-            int previousVariableHash = isDirty && !isSubtreeDirty ? element.variableContext.GetVariableHash() : 0;
+            // A Self re-match compares what the children inherit before and after it. The old inherited data is
+            // acquired so SetComputedStyle and animation writes copy it instead of overwriting it in place.
+            StyleVariableContext previousVariableContext = null;
+            if (isDirty && !isSubtreeDirty && element.styleInitialized)
+            {
+                m_PreviousInheritedData = element.computedStyle.inheritedData.Acquire();
+                previousVariableContext = element.variableContext;
+            }
 
             int originalStyleSheetCount = m_StyleMatchingContext.styleSheetCount;
             var elementSheets = element.styleSheetList;
@@ -665,12 +674,19 @@ namespace UnityEngine.UIElements
                 m_StyleMatchingContext.currentElement = null;
                 m_TempMatchResults.Clear();
 
-                // Children of a Self re-match only follow when what they inherit changed.
-                if (!isSubtreeDirty && (element.inheritedStylesHash != previousInheritedStylesHash ||
-                                        element.variableContext.GetVariableHash() != previousVariableHash))
+                // Children of a Self re-match only follow when what they inherit changed. The inherited data is
+                // compared by value, not by inheritedStylesHash, so a hash collision can't skip them.
+                if (!isSubtreeDirty)
                 {
-                    isSubtreeDirty = true;
-                    element.styleDirtyFlags = StyleDirtyFlags.Subtree;
+                    bool inheritanceChanged = !m_PreviousInheritedData.IsAlive() ||
+                        element.computedStyle.inheritedData != m_PreviousInheritedData ||
+                        !ReferenceEquals(element.variableContext, previousVariableContext);
+                    m_PreviousInheritedData.SafeRelease();
+                    if (inheritanceChanged)
+                    {
+                        isSubtreeDirty = true;
+                        element.styleDirtyFlags = StyleDirtyFlags.Subtree;
+                    }
                 }
             }
             else
