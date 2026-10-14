@@ -128,6 +128,24 @@ struct USSStatsStyleProfiler : IStyleProfiler
         m_StyleSheetStopwatch.Start();
     }
 
+    public bool isRestyleTrackingEnabled => false;
+
+    public void BeginStyleUpdate()
+    {
+    }
+
+    public void EndStyleUpdate()
+    {
+    }
+
+    public void OnElementRestyled(StyleRestyleReason reason)
+    {
+    }
+
+    public void OnElementStyleResolved()
+    {
+    }
+
     public List<StyleSheetProfilingResult> GetResults()
     {
         // Fold the native per-descriptor statistics into the per-selector caches. Sheet self
