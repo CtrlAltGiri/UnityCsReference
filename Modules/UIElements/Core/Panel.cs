@@ -1083,6 +1083,7 @@ namespace UnityEngine.UIElements
 
         public IPanelDebug panelDebug { get; set; }
         public ILiveReloadSystem liveReloadSystem { get; set; }
+        internal PanelStyleInvalidationIndex styleInvalidationIndex { get; } = new PanelStyleInvalidationIndex();
         public readonly Lazy<HashSet<TextElement>> textElementRegistry = new(isThreadSafe: false);
 
         public void RegisterChangeProcessor(IVisualElementChangeProcessor processor)
@@ -1680,6 +1681,7 @@ namespace UnityEngine.UIElements
                 atlas = null;
                 visualTree.Clear();
                 m_VisualTreeUpdater.Dispose();
+                styleInvalidationIndex.Clear();
                 if (textElementRegistry.IsValueCreated)
                     textElementRegistry.Value.Clear();
             }
@@ -1878,6 +1880,7 @@ namespace UnityEngine.UIElements
 
         public override void DirtyStyleSheets()
         {
+            styleInvalidationIndex.MarkDirty();
             m_VisualTreeUpdater.DirtyStyleSheets();
         }
 

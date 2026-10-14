@@ -52,7 +52,12 @@ namespace UnityEngine.UIElements
             sheets.Insert(index, styleSheet);
             m_Element.IncrementVersion(VersionChangeType.StyleSheet);
 
-            m_Element.elementPanel?.liveReloadSystem.StartStyleSheetAssetTracking(styleSheet);
+            var panel = m_Element.elementPanel;
+            if (panel != null)
+            {
+                panel.styleInvalidationIndex.AddSheet(styleSheet);
+                panel.liveReloadSystem.StartStyleSheetAssetTracking(styleSheet);
+            }
         }
 
         /// <summary>
@@ -67,8 +72,10 @@ namespace UnityEngine.UIElements
             if (m_Element.elementPanel != null)
             {
                 var liveReloadSystem = m_Element.elementPanel.liveReloadSystem;
+                var invalidationIndex = m_Element.elementPanel.styleInvalidationIndex;
                 foreach (var styleSheet in sheets)
                 {
+                    invalidationIndex.RemoveSheet(styleSheet);
                     liveReloadSystem.StopStyleSheetAssetTracking(styleSheet);
                 }
             }
@@ -94,7 +101,12 @@ namespace UnityEngine.UIElements
                 }
                 m_Element.IncrementVersion(VersionChangeType.StyleSheet);
 
-                m_Element.elementPanel?.liveReloadSystem.StopStyleSheetAssetTracking(styleSheet);
+                var panel = m_Element.elementPanel;
+                if (panel != null)
+                {
+                    panel.styleInvalidationIndex.RemoveSheet(styleSheet);
+                    panel.liveReloadSystem.StopStyleSheetAssetTracking(styleSheet);
+                }
 
                 return true;
             }
@@ -123,6 +135,10 @@ namespace UnityEngine.UIElements
 
                 if (m_Element.elementPanel != null)
                 {
+                    var invalidationIndex = m_Element.elementPanel.styleInvalidationIndex;
+                    invalidationIndex.RemoveSheet(old);
+                    invalidationIndex.AddSheet(@new);
+
                     var liveReloadSystem = m_Element.elementPanel.liveReloadSystem;
                     liveReloadSystem.StopStyleSheetAssetTracking(old);
                     liveReloadSystem.StartStyleSheetAssetTracking(@new);
