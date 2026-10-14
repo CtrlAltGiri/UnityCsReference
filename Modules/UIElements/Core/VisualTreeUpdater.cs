@@ -158,6 +158,20 @@ namespace UnityEngine.UIElements
             }
         }
 
+        public void OnStyleFeaturesChanged(VisualElement ve, ReadOnlySpan<int> changedIds, VersionChangeType versionChangeType)
+        {
+            visualTreeEditorUpdater.OnVersionChanged(ve, versionChangeType);
+
+            for (int i = 0; i < (int)VisualTreeUpdatePhase.Count; i++)
+            {
+                var updater = m_UpdaterArray[i];
+                if (updater is IStyleFeatureChangeReceiver receiver)
+                    receiver.OnStyleFeaturesChanged(ve, changedIds, versionChangeType);
+                else
+                    updater?.OnVersionChanged(ve, versionChangeType);
+            }
+        }
+
         public void DirtyStyleSheets()
         {
             var styleUpdater = m_UpdaterArray[VisualTreeUpdatePhase.Styles] as VisualTreeStyleUpdater;
@@ -261,5 +275,11 @@ namespace UnityEngine.UIElements
 
         public abstract void Update();
         public abstract void OnVersionChanged(VisualElement ve, VersionChangeType versionChangeType);
+    }
+
+    // Implemented by updaters that can restrict a name or class change to the selectors referencing the changed ids.
+    internal interface IStyleFeatureChangeReceiver
+    {
+        void OnStyleFeaturesChanged(VisualElement ve, ReadOnlySpan<int> changedIds, VersionChangeType versionChangeType);
     }
 }

@@ -768,6 +768,12 @@ namespace UnityEngine.UIElements
         // Updaters can request an panel invalidation when some callbacks aren't coming from UIElements internally
         internal abstract void RequestUpdateAfterExternalEvent(IVisualTreeUpdater updater);
         internal abstract void OnVersionChanged(VisualElement ele, VersionChangeType changeTypeFlag);
+
+        // Same as OnVersionChanged, for a name or class change that only affects the selectors referencing changedIds.
+        internal virtual void OnStyleFeaturesChanged(VisualElement ele, ReadOnlySpan<int> changedIds, VersionChangeType changeTypeFlag)
+        {
+            OnVersionChanged(ele, changeTypeFlag);
+        }
         internal abstract void SetUpdater(IVisualTreeUpdater updater, VisualTreeUpdatePhase phase);
 
         // Need virtual for tests
@@ -1990,7 +1996,18 @@ namespace UnityEngine.UIElements
         {
             ++m_Version;
             m_VisualTreeUpdater.OnVersionChanged(ve, versionChangeType);
+            NotifyVersionChanged(ve, versionChangeType);
+        }
 
+        internal override void OnStyleFeaturesChanged(VisualElement ve, ReadOnlySpan<int> changedIds, VersionChangeType versionChangeType)
+        {
+            ++m_Version;
+            m_VisualTreeUpdater.OnStyleFeaturesChanged(ve, changedIds, versionChangeType);
+            NotifyVersionChanged(ve, versionChangeType);
+        }
+
+        private void NotifyVersionChanged(VisualElement ve, VersionChangeType versionChangeType)
+        {
             if (panelChangeReceiver != null)
                 using (m_MarkerPanelChangeReceiver.Auto())
                 {

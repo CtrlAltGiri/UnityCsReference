@@ -90,7 +90,7 @@ namespace UnityEngine.UIElements
     }
 
     [VisibleToOtherModules("UnityEditor.UIBuilderModule")]
-    internal class VisualTreeStyleUpdater<TTraversal, TProfiler> : BaseVisualTreeUpdater
+    internal class VisualTreeStyleUpdater<TTraversal, TProfiler> : BaseVisualTreeUpdater, IStyleFeatureChangeReceiver
         where TTraversal : VisualTreeStyleUpdaterTraversal<TProfiler>, new()
         where TProfiler : struct, IStyleProfiler
     {
@@ -137,6 +137,18 @@ namespace UnityEngine.UIElements
             {
                 m_TransitionPropertyUpdateList.Add(ve);
             }
+        }
+
+        public void OnStyleFeaturesChanged(VisualElement ve, ReadOnlySpan<int> changedIds, VersionChangeType versionChangeType)
+        {
+            if ((versionChangeType & VersionChangeType.TransitionProperty) != 0)
+            {
+                OnVersionChanged(ve, versionChangeType);
+                return;
+            }
+
+            ++m_Version;
+            m_StyleContextHierarchyTraversal.AddChangedElement(ve, changedIds);
         }
 
         public override void Update()
@@ -302,7 +314,20 @@ namespace UnityEngine.UIElements
         private float currentPixelsPerPoint { get; set; } = 1.0f;
         // Re-entrancy protection: set to true during style traversal, false before event dispatch
         private bool m_IsApplyingStyles;
-        private List<VisualElement> m_ApplyStyleUpdateList = new List<VisualElement>();
+        private List<QueuedStyleChange> m_ApplyStyleUpdateList = new List<QueuedStyleChange>();
+
+        private struct QueuedStyleChange
+        {
+            public VisualElement element;
+            public StyleDirtyFlags flags;
+            public PendingInvalidationSet pendingSet;
+        }
+
+        // Pending descendant invalidation sets attached to elements flagged StyleDirtyFlags.HasPendingSet.
+        private readonly Dictionary<VisualElement, PendingInvalidationSet> m_PendingSets = new Dictionary<VisualElement, PendingInvalidationSet>();
+        private readonly Stack<PendingInvalidationSet> m_PendingSetPool = new Stack<PendingInvalidationSet>();
+        // Sets of the ancestors on the current traversal path, pushed and popped with the ancestor filter.
+        private readonly List<PendingInvalidationSet> m_ActivePendingSets = new List<PendingInvalidationSet>();
 
         StyleMatchingContext m_StyleMatchingContext = new StyleMatchingContext(applyPseudoMasks: true);
         StylePropertyReader m_StylePropertyReader = new StylePropertyReader();
@@ -338,6 +363,13 @@ namespace UnityEngine.UIElements
                     m_StyleMatchingContext.Reset();
                     m_TempMatchResults.Clear();
 
+                    // Sets of elements the traversal didn't reach (detached, or aborted by an exception) are dropped.
+                    // An element still flagged HasPendingSet is then restyled as Subtree on the next update.
+                    m_ActivePendingSets.Clear();
+                    foreach (var set in m_PendingSets.Values)
+                        ReturnPendingSet(set);
+                    m_PendingSets.Clear();
+
                     // Set flag to false before dispatching events - user callbacks can directly modify elements
                     m_IsApplyingStyles = false;
 
@@ -364,32 +396,128 @@ namespace UnityEngine.UIElements
 
         public void AddChangedElement(VisualElement ve)
         {
-            // If we're inside style traversal, queue the element to avoid re-entrancy
+            AddChangedElement(ve, StyleDirtyFlags.Subtree, null);
+        }
+
+        // Name or class change: only restyle what selectors referencing changedIds can match.
+        public void AddChangedElement(VisualElement ve, ReadOnlySpan<int> changedIds)
+        {
+            var index = ve.elementPanel?.styleInvalidationIndex;
+            if (index == null || index.requiresSubtreeInvalidation)
+            {
+                AddChangedElement(ve);
+                return;
+            }
+
+            var flags = StyleDirtyFlags.None;
+            PendingInvalidationSet pendingSet = null;
+            foreach (var id in changedIds)
+            {
+                if (index.ContainsSelf(id))
+                    flags |= StyleDirtyFlags.Self;
+
+                if (index.TryGetDescendantInvalidation(id, out var wildcard, out var subjectIds))
+                {
+                    pendingSet ??= RentPendingSet();
+                    pendingSet.Add(wildcard, subjectIds);
+                    flags |= StyleDirtyFlags.HasPendingSet;
+                }
+            }
+
+            if (flags != StyleDirtyFlags.None)
+                AddChangedElement(ve, flags, pendingSet);
+        }
+
+        private void AddChangedElement(VisualElement ve, StyleDirtyFlags flags, PendingInvalidationSet pendingSet)
+        {
+            // If we're inside style traversal, queue the change to avoid re-entrancy
             if (m_IsApplyingStyles)
             {
-                m_ApplyStyleUpdateList.Add(ve);
+                m_ApplyStyleUpdateList.Add(new QueuedStyleChange { element = ve, flags = flags, pendingSet = pendingSet });
             }
             else
             {
-                ve.stylesDirty = true;
-                PropagateToParents(ve);
+                MarkStylesDirty(ve, flags, pendingSet);
             }
         }
 
         public void ProcessQueuedElements()
         {
-            // Move queued elements to changed list for next frame
-            foreach (var ve in m_ApplyStyleUpdateList)
+            // Move queued changes to the tree for next frame. The list may contain duplicates, which
+            // MarkStylesDirty merges.
+            foreach (var change in m_ApplyStyleUpdateList)
             {
-                // Since list may contain duplicate, skip if already dirty
-                // We assume ProcessQueuedElements() is called on a fully clean tree right after style updated
-                // So in theory no desync between stylesDirty and stylesAncestorOfDirty is possible
-                if (ve.stylesDirty)
-                    continue;
-                ve.stylesDirty = true;
-                PropagateToParents(ve);
+                MarkStylesDirty(change.element, change.flags, change.pendingSet);
             }
             m_ApplyStyleUpdateList.Clear();
+        }
+
+        private void MarkStylesDirty(VisualElement ve, StyleDirtyFlags flags, PendingInvalidationSet pendingSet)
+        {
+            var current = ve.styleDirtyFlags;
+            if ((current & StyleDirtyFlags.Subtree) != 0)
+            {
+                // A full subtree re-match subsumes any finer invalidation.
+                ReturnPendingSet(pendingSet);
+            }
+            else if ((flags & StyleDirtyFlags.Subtree) != 0)
+            {
+                if (m_PendingSets.Remove(ve, out var previous))
+                    ReturnPendingSet(previous);
+                ReturnPendingSet(pendingSet);
+                ve.styleDirtyFlags = StyleDirtyFlags.Subtree;
+            }
+            else
+            {
+                if (pendingSet != null)
+                {
+                    if (m_PendingSets.TryGetValue(ve, out var existing))
+                    {
+                        existing.UnionWith(pendingSet);
+                        ReturnPendingSet(pendingSet);
+                    }
+                    else
+                    {
+                        m_PendingSets.Add(ve, pendingSet);
+                    }
+                }
+                ve.styleDirtyFlags = current | flags;
+            }
+
+            PropagateToParents(ve);
+        }
+
+        private PendingInvalidationSet RentPendingSet()
+        {
+            return m_PendingSetPool.Count > 0 ? m_PendingSetPool.Pop() : new PendingInvalidationSet();
+        }
+
+        private void ReturnPendingSet(PendingInvalidationSet pendingSet)
+        {
+            if (pendingSet == null)
+                return;
+            pendingSet.Reset();
+            m_PendingSetPool.Push(pendingSet);
+        }
+
+        // True when TraverseRecursive has to visit the element: it, an ancestor's subtree or pending set,
+        // or one of its descendants is dirty.
+        protected bool NeedsStyleTraversal(VisualElement element)
+        {
+            if (element.stylesAncestorOfDirty || element.styleDirtyFlags != StyleDirtyFlags.None || m_ActivePendingSets.Count > 0)
+                return true;
+            var parent = element.hierarchy.parent;
+            return parent != null && (parent.styleDirtyFlags & StyleDirtyFlags.Subtree) != 0;
+        }
+
+        private bool MatchesActivePendingSets(VisualElement element)
+        {
+            foreach (var set in m_ActivePendingSets)
+            {
+                if (set.Matches(element))
+                    return true;
+            }
+            return false;
         }
 
         public void Clear()
@@ -417,27 +545,47 @@ namespace UnityEngine.UIElements
         public override void TraverseRecursive(VisualElement element, int depth)
         {
             // Skip if element is neither dirty nor ancestor of dirty
-            // Note: We check parent.stylesDirty because children inherit from parent and need updating
-            var parent = element.hierarchy.parent;
-            bool isDirty = element.stylesDirty || (parent != null && parent.stylesDirty);
-
-            if (!element.stylesAncestorOfDirty && !isDirty)
+            // Note: We check the parent's Subtree flag because children inherit from parent and need updating
+            if (!NeedsStyleTraversal(element))
             {
                 return;
             }
 
-            // If the element is dirty (either directly or inherited from parent), we need to erase pseudo masks
-            // and ensure the flag is set so children can inherit it during recursion
-            if (isDirty)
+            var parent = element.hierarchy.parent;
+            var dirtyFlags = element.styleDirtyFlags;
+            PendingInvalidationSet pendingSet = null;
+            if ((dirtyFlags & StyleDirtyFlags.HasPendingSet) != 0 && !m_PendingSets.Remove(element, out pendingSet))
             {
-                element.stylesDirty = true; // Propagate inherited dirty to this element's flag for children
-                unsafe
+                // The set was dropped by an aborted traversal: fall back to a full subtree re-match.
+                dirtyFlags |= StyleDirtyFlags.Subtree;
+            }
+
+            bool isSubtreeDirty = (dirtyFlags & StyleDirtyFlags.Subtree) != 0 ||
+                (parent != null && (parent.styleDirtyFlags & StyleDirtyFlags.Subtree) != 0);
+            bool isDirty = isSubtreeDirty || (dirtyFlags & StyleDirtyFlags.Self) != 0 || MatchesActivePendingSets(element);
+
+            // A subtree re-match recomputes every pseudo mask below, so erase them and set the flag so children
+            // inherit it during recursion. A Self re-match leaves the descendants' contributions to the masks
+            // in place, so the previous masks are kept and the new matches are added to them.
+            PseudoStates previousTriggerPseudoMask = PseudoStates.None;
+            PseudoStates previousDependencyPseudoMask = PseudoStates.None;
+            unsafe
+            {
+                ref var selectorData = ref *element.selectorDataPtr;
+                if (isSubtreeDirty)
                 {
-                    ref var selectorData = ref *element.selectorDataPtr;
+                    element.styleDirtyFlags = StyleDirtyFlags.Subtree;
                     selectorData.triggerPseudoMask = PseudoStates.None;
                     selectorData.dependencyPseudoMask = PseudoStates.None;
                 }
+                else if (isDirty)
+                {
+                    previousTriggerPseudoMask = selectorData.triggerPseudoMask;
+                    previousDependencyPseudoMask = selectorData.dependencyPseudoMask;
+                }
             }
+            int previousInheritedStylesHash = element.inheritedStylesHash;
+            int previousVariableHash = isDirty && !isSubtreeDirty ? element.variableContext.GetVariableHash() : 0;
 
             int originalStyleSheetCount = m_StyleMatchingContext.styleSheetCount;
             var elementSheets = element.styleSheetList;
@@ -458,6 +606,15 @@ namespace UnityEngine.UIElements
             {
                 m_StyleMatchingContext.currentElement = element;
                 StyleSelectorHelper<TStyleProfiler>.FindMatches(m_StyleMatchingContext, m_TempMatchResults, originalStyleSheetCount - 1);
+                if (!isSubtreeDirty)
+                {
+                    unsafe
+                    {
+                        ref var selectorData = ref *element.selectorDataPtr;
+                        selectorData.triggerPseudoMask |= previousTriggerPseudoMask;
+                        selectorData.dependencyPseudoMask |= previousDependencyPseudoMask;
+                    }
+                }
                 var newStyle = ProcessMatchedRules(element, m_TempMatchResults);
                 newStyle.Acquire();
 
@@ -507,6 +664,14 @@ namespace UnityEngine.UIElements
                 element.inheritedStylesHash = element.computedStyle.inheritedData.GetHashCode();
                 m_StyleMatchingContext.currentElement = null;
                 m_TempMatchResults.Clear();
+
+                // Children of a Self re-match only follow when what they inherit changed.
+                if (!isSubtreeDirty && (element.inheritedStylesHash != previousInheritedStylesHash ||
+                                        element.variableContext.GetVariableHash() != previousVariableHash))
+                {
+                    isSubtreeDirty = true;
+                    element.styleDirtyFlags = StyleDirtyFlags.Subtree;
+                }
             }
             else
             {
@@ -524,14 +689,21 @@ namespace UnityEngine.UIElements
                 m_CustomStyleResolvedElements.Add(element);
             }
 
+            // A subtree re-match already covers everything the pending set can reach.
+            bool pushPendingSet = pendingSet != null && !isSubtreeDirty;
+            if (pushPendingSet)
+                m_ActivePendingSets.Add(pendingSet);
             m_StyleMatchingContext.ancestorFilter.PushElement(element);
 
             Recurse(element, depth);
 
             m_StyleMatchingContext.ancestorFilter.PopElement();
+            if (pushPendingSet)
+                m_ActivePendingSets.RemoveAt(m_ActivePendingSets.Count - 1);
+            ReturnPendingSet(pendingSet);
 
             // Clear flags after traversing children (so children can see parent's dirty state during traversal)
-            element.stylesDirty = false;
+            element.styleDirtyFlags = StyleDirtyFlags.None;
             element.stylesAncestorOfDirty = false;
 
             m_StyleMatchingContext.variableContext = originalVariableContext;

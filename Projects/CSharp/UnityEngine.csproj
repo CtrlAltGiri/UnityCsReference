@@ -5632,6 +5632,9 @@
     <Compile Include="..\..\Modules\UIElements\Core\StyleSheets\PanelStyleInvalidationIndex.cs">
       <Link>Modules\UIElements\Core\StyleSheets\PanelStyleInvalidationIndex.cs</Link>
     </Compile>
+    <Compile Include="..\..\Modules\UIElements\Core\StyleSheets\StyleDirtyFlags.cs">
+      <Link>Modules\UIElements\Core\StyleSheets\StyleDirtyFlags.cs</Link>
+    </Compile>
     <Compile Include="..\..\Modules\UIElements\Core\StyleSheets\StyleInvalidationData.cs">
       <Link>Modules\UIElements\Core\StyleSheets\StyleInvalidationData.cs</Link>
     </Compile>
