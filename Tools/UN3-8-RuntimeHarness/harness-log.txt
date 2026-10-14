@@ -1,0 +1,31 @@
+[UN3-8] tree: 103 elements per panel, stock updater = UnityEngine.UIElements.VisualTreeStyleUpdater, ported = UN3_8Harness.PortedStyleUpdater
+[UN3-8] PASS initial style pass: ported and stock 6000.3 computed styles identical
+[UN3-8] --- scenario 1: random class/name mutations, invalidation sets ON, verify ON ---
+[UN3-8] 300 passes: ported re-matched 1125 elements, stock 6000.3 re-matched 2239 (50.2%), verifier checked 104 elements on the last pass
+[UN3-8] PASS computed styles identical to stock after every pass (mismatching passes: 0)
+[UN3-8] PASS verify mode reported no mismatches on correct invalidation (0)
+[UN3-8] PASS invalidation sets actually pruned re-matching
+[UN3-8] --- scenario 2: kill switch s_UseInvalidationSets ---
+[UN3-8] sets ON: toggle .unused on group0 -> ported re-matched 0
+[UN3-8] PASS sets ON: unreferenced class change re-matches nothing
+[UN3-8] flip OFF -> forced pass re-matched 103/103 harness elements (stock panel, also forced: 103)
+[UN3-8] PASS flip OFF forces one full restyle
+[UN3-8] PASS flip OFF: only one forced restyle (next update has nothing to do)
+[UN3-8] PASS sets OFF: re-matched element set identical to stock 6000.3 full-subtree behaviour for 100 mutations (mismatches: 0)
+[UN3-8] PASS sets OFF: computed styles identical to stock
+[UN3-8] sets OFF: toggle .unused on group0 -> ported re-matched 17 (its whole subtree)
+[UN3-8] PASS sets OFF: unreferenced class change re-matches the whole subtree, like today
+[UN3-8] flip ON -> forced pass re-matched 103/103
+[UN3-8] PASS flip ON forces one full restyle
+[UN3-8] PASS flip ON: pruning is back
+[UN3-8] PASS after flipping back ON styles identical to stock
+[UN3-8] --- scenario 3: injected under-invalidation (index drops descendant entry for '.a') ---
+[UN3-8] ported re-matched 0 (stock 17); verify mode reported 2 mismatching elements:
+[UN3-8]   captured: Style invalidation verification failed for EditorPanelRootElement#unity-panel-container > VisualElement#harness-root.root.a.x.unused.big.dark.c > VisualElement#group2.unused.dark.big.a > VisualElement#hero.swatch.big.c.dark: matchingRulesHash is -5741113659530316280 but a full re-match gives -6095471276941604997. The element was not re-matched after a change that affects it.
+[UN3-8]   captured: Style invalidation verification failed for EditorPanelRootElement#unity-panel-container > VisualElement#harness-root.root.a.x.unused.big.dark.c > VisualElement#group2.unused.dark.big.a > VisualElement#hero.c.swatch.big.unused: matchingRulesHash is 6585514552784132491 but a full re-match gives -2070081422151653020. The element was not re-matched after a change that affects it.
+[UN3-8] PASS verify mode catches the injected under-invalidation
+[UN3-8] PASS mismatch log contains the element path
+[UN3-8] PASS sanity: the injected bug really left stale styles (differs from stock)
+[UN3-8] PASS kill switch OFF works around the faulty index: styles identical to stock
+[UN3-8] PASS kill switch OFF: verification is skipped (no pruned pass)
+[UN3-8] RESULT: PASS

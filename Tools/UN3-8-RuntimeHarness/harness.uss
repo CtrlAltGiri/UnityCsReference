@@ -1,0 +1,11 @@
+.root { --accent: rgb(0, 128, 255); }
+.dark { --accent: rgb(255, 0, 0); color: rgb(200, 200, 200); }
+.a .b { width: 11px; }
+.a > .c { height: 12px; }
+#hero .b { margin-left: 3px; }
+.swatch { background-color: var(--accent); }
+.c { padding-top: 4px; }
+Label { padding-left: 1px; }
+.x * { border-left-width: 2px; }
+.big { font-size: 30px; }
+.c.b { opacity: 0.5; }
