@@ -5650,6 +5650,9 @@
     <Compile Include="..\..\Modules\UIElements\Core\StyleSheets\StyleComplexSelector.cs">
       <Link>Modules\UIElements\Core\StyleSheets\StyleComplexSelector.cs</Link>
     </Compile>
+    <Compile Include="..\..\Modules\UIElements\Core\StyleSheets\StyleInvalidationData.cs">
+      <Link>Modules\UIElements\Core\StyleSheets\StyleInvalidationData.cs</Link>
+    </Compile>
     <Compile Include="..\..\Modules\UIElements\Core\StyleSheets\StyleProfiler.cs">
       <Link>Modules\UIElements\Core\StyleSheets\StyleProfiler.cs</Link>
     </Compile>

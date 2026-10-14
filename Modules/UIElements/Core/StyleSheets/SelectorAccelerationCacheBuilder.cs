@@ -42,7 +42,16 @@ namespace UnityEngine.UIElements
         private static readonly RefComparison<SelectorRangeDescriptor> s_DescriptorRefComparison = CompareDescriptors;
 
         // Public API
-        public static unsafe void BuildFlattenedCache(ref SelectorAccelerationCacheEntry entry, StyleSheet styleSheet)
+        public static void BuildFlattenedCache(ref SelectorAccelerationCacheEntry entry, StyleSheet styleSheet)
+        {
+            BuildFlattenedCacheCore(ref entry, styleSheet);
+
+            // Built over the same sheet and imports, even when the sheet is too large to be
+            // accelerated: invalidation only needs the authoring selectors.
+            entry.invalidationData = StyleInvalidationData.Build(styleSheet, entry.m_BuildId);
+        }
+
+        private static unsafe void BuildFlattenedCacheCore(ref SelectorAccelerationCacheEntry entry, StyleSheet styleSheet)
         {
             // Count total parts, selectors, and complex selectors (including imported sheets)
             int totalParts = 0;
