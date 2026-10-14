@@ -9,6 +9,18 @@ using UnityEngine.Bindings;
 
 namespace UnityEngine.UIElements.StyleSheets;
 
+// Why an element was re-matched and re-resolved during a style update.
+[VisibleToOtherModules("UnityEditor.UIBuilderModule", "UnityEditor.GraphViewModule")]
+internal enum StyleRestyleReason
+{
+    // First style resolution since the element was added to the panel.
+    Initial,
+    // The element itself was invalidated (class/name/pseudo-state/style sheet/inline style change).
+    Self,
+    // Only an ancestor was invalidated; the element is restyled because dirtiness propagates down.
+    Ancestor,
+}
+
 [VisibleToOtherModules("UnityEditor.UIBuilderModule")]
 internal interface IStyleProfiler
 {
@@ -27,6 +39,21 @@ internal interface IStyleProfiler
     // materialization included) lands in sheet self time.
     SelectorMatchStatsInfo[] BeginSelectorMatching(in SelectorAccelerationCacheEntry accelerationCacheEntry);
     void EndSelectorMatching();
+
+    // Restyle accounting. Callers only invoke OnElementRestyled/OnElementStyleResolved when
+    // isRestyleTrackingEnabled is true; NoOpStyleProfiler returns a constant false so the JIT
+    // folds the tracking branches (reason computation included) out of the unprofiled updater.
+    bool isRestyleTrackingEnabled { get; }
+
+    // Brackets one VisualTreeStyleUpdater style pass (one Update / ApplyStyles call).
+    void BeginStyleUpdate();
+    void EndStyleUpdate();
+
+    // An element was re-matched (FindMatches) and its computed style re-applied.
+    void OnElementRestyled(StyleRestyleReason reason);
+
+    // A restyled element missed the StyleCache and its ComputedStyle was resolved from its matched rules.
+    void OnElementStyleResolved();
 }
 
 static class StyleProfilerStorage<TProfilerType> where TProfilerType : struct, IStyleProfiler
@@ -56,6 +83,24 @@ struct NoOpStyleProfiler : IStyleProfiler
     public SelectorMatchStatsInfo[] BeginSelectorMatching(in SelectorAccelerationCacheEntry accelerationCacheEntry) => null;
 
     public void EndSelectorMatching()
+    {
+    }
+
+    public bool isRestyleTrackingEnabled => false;
+
+    public void BeginStyleUpdate()
+    {
+    }
+
+    public void EndStyleUpdate()
+    {
+    }
+
+    public void OnElementRestyled(StyleRestyleReason reason)
+    {
+    }
+
+    public void OnElementStyleResolved()
     {
     }
 }

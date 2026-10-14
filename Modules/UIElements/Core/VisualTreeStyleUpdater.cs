@@ -202,8 +202,17 @@ namespace UnityEngine.UIElements
         protected void ApplyStyles()
         {
             Debug.Assert(visualTree.panel != null);
-            m_StyleContextHierarchyTraversal.PrepareTraversal(panel, panel.scaledPixelsPerPoint);
-            m_StyleContextHierarchyTraversal.Traverse(visualTree);
+            ref TProfiler profiler = ref StyleProfilerStorage<TProfiler>.InstanceByRef;
+            profiler.BeginStyleUpdate();
+            try
+            {
+                m_StyleContextHierarchyTraversal.PrepareTraversal(panel, panel.scaledPixelsPerPoint);
+                m_StyleContextHierarchyTraversal.Traverse(visualTree);
+            }
+            finally
+            {
+                profiler.EndStyleUpdate();
+            }
         }
     }
 
@@ -418,7 +427,8 @@ namespace UnityEngine.UIElements
             // Skip if element is neither dirty nor ancestor of dirty
             // Note: We check parent.stylesDirty because children inherit from parent and need updating
             var parent = element.hierarchy.parent;
-            bool isDirty = element.stylesDirty || (parent != null && parent.stylesDirty);
+            bool isSelfDirty = element.stylesDirty;
+            bool isDirty = isSelfDirty || (parent != null && parent.stylesDirty);
 
             if (!element.stylesAncestorOfDirty && !isDirty)
             {
@@ -455,6 +465,15 @@ namespace UnityEngine.UIElements
             int originalCustomStyleCount = element.computedStyle.customPropertiesCount;
             if (isDirty)
             {
+                ref TStyleProfiler profiler = ref StyleProfilerStorage<TStyleProfiler>.InstanceByRef;
+                if (profiler.isRestyleTrackingEnabled)
+                {
+                    var reason = !element.styleInitialized ? StyleRestyleReason.Initial
+                        : isSelfDirty ? StyleRestyleReason.Self
+                        : StyleRestyleReason.Ancestor;
+                    profiler.OnElementRestyled(reason);
+                }
+
                 m_StyleMatchingContext.currentElement = element;
                 StyleSelectorHelper<TStyleProfiler>.FindMatches(m_StyleMatchingContext, m_TempMatchResults, originalStyleSheetCount - 1);
                 var newStyle = ProcessMatchedRules(element, m_TempMatchResults);
@@ -658,6 +677,10 @@ namespace UnityEngine.UIElements
             if (!StyleCache.TryGetValue(matchingRulesHash, out var resolvedStyles) || ComputedStyleUtility.HasStaleAssetReference(ref resolvedStyles))
             {
                 ref var parentStyle = ref parent?.computedStyle != null ? ref parent.computedStyle : ref InitialStyle.Get();
+                ref TStyleProfiler profiler = ref StyleProfilerStorage<TStyleProfiler>.InstanceByRef;
+                if (profiler.isRestyleTrackingEnabled)
+                    profiler.OnElementStyleResolved();
+
                 resolvedStyles = ComputedStyle.Create(ref parentStyle);
                 resolvedStyles.matchingRulesHash = matchingRulesHash;
 

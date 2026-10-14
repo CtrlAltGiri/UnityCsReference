@@ -8770,6 +8770,9 @@
     <Compile Include="..\..\Modules\GraphViewEditor\Utils\GraphViewTemplateDescriptor.cs">
       <Link>Modules\GraphViewEditor\Utils\GraphViewTemplateDescriptor.cs</Link>
     </Compile>
+    <Compile Include="..\..\Modules\GraphViewEditor\Utils\GraphViewRestyleBenchmark.cs">
+      <Link>Modules\GraphViewEditor\Utils\GraphViewRestyleBenchmark.cs</Link>
+    </Compile>
     <Compile Include="..\..\Modules\GraphViewEditor\Utils\RectUtils.cs">
       <Link>Modules\GraphViewEditor\Utils\RectUtils.cs</Link>
     </Compile>
@@ -16197,6 +16200,15 @@
     </Compile>
     <Compile Include="..\..\Modules\UIElementsEditor\Debugger\UIR\UIRDebugUtility.cs">
       <Link>Modules\UIElementsEditor\Debugger\UIR\UIRDebugUtility.cs</Link>
+    </Compile>
+    <Compile Include="..\..\Modules\UIElementsEditor\Debugger\RestyleStats\RestyleStatsStyleProfiler.cs">
+      <Link>Modules\UIElementsEditor\Debugger\RestyleStats\RestyleStatsStyleProfiler.cs</Link>
+    </Compile>
+    <Compile Include="..\..\Modules\UIElementsEditor\Debugger\RestyleStats\RestyleStatsStyleUpdater.cs">
+      <Link>Modules\UIElementsEditor\Debugger\RestyleStats\RestyleStatsStyleUpdater.cs</Link>
+    </Compile>
+    <Compile Include="..\..\Modules\UIElementsEditor\Debugger\RestyleStats\StyleRestyleBenchmarks.cs">
+      <Link>Modules\UIElementsEditor\Debugger\RestyleStats\StyleRestyleBenchmarks.cs</Link>
     </Compile>
     <Compile Include="..\..\Modules\UIElementsEditor\Debugger\USSStats\StyleSheetProfilingResult.cs">
       <Link>Modules\UIElementsEditor\Debugger\USSStats\StyleSheetProfilingResult.cs</Link>
