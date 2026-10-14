@@ -6,6 +6,7 @@ using Unity.Scripting.LifecycleManagement;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Text;
 using Unity.Profiling;
 using UnityEngine.Bindings;
 using UnityEngine.UIElements.StyleSheets;
@@ -162,7 +163,8 @@ namespace UnityEngine.UIElements
             try
             {
                 m_LastVersion = m_Version;
-                panel?.styleInvalidationIndex.Refresh();
+                if (StyleInvalidationSettings.s_UseInvalidationSets)
+                    panel?.styleInvalidationIndex.Refresh();
                 ApplyStyles();
 
                 var animSystem = panel?.GetUpdater(VisualTreeUpdatePhase.Animation) as VisualElementAnimationSystem;
@@ -354,6 +356,9 @@ namespace UnityEngine.UIElements
                 try
                 {
                     base.Traverse(element);
+
+                    if (StyleInvalidationSettings.s_VerifyInvalidation && StyleInvalidationSettings.s_UseInvalidationSets)
+                        VerifyInvalidation(element);
                 }
                 finally
                 {
@@ -403,7 +408,7 @@ namespace UnityEngine.UIElements
         public void AddChangedElement(VisualElement ve, ReadOnlySpan<int> changedIds)
         {
             var index = ve.elementPanel?.styleInvalidationIndex;
-            if (index == null || index.requiresSubtreeInvalidation)
+            if (!StyleInvalidationSettings.s_UseInvalidationSets || index == null || index.requiresSubtreeInvalidation)
             {
                 AddChangedElement(ve);
                 return;
@@ -504,7 +509,7 @@ namespace UnityEngine.UIElements
         // or one of its descendants is dirty.
         protected bool NeedsStyleTraversal(VisualElement element)
         {
-            if (element.stylesAncestorOfDirty || element.styleDirtyFlags != StyleDirtyFlags.None || m_ActivePendingSets.Count > 0)
+            if (m_IsVerifyingInvalidation || element.stylesAncestorOfDirty || element.styleDirtyFlags != StyleDirtyFlags.None || m_ActivePendingSets.Count > 0)
                 return true;
             var parent = element.hierarchy.parent;
             return parent != null && (parent.styleDirtyFlags & StyleDirtyFlags.Subtree) != 0;
@@ -544,6 +549,12 @@ namespace UnityEngine.UIElements
 
         public override void TraverseRecursive(VisualElement element, int depth)
         {
+            if (m_IsVerifyingInvalidation)
+            {
+                VerifyRecursive(element, depth);
+                return;
+            }
+
             // Skip if element is neither dirty nor ancestor of dirty
             // Note: We check the parent's Subtree flag because children inherit from parent and need updating
             if (!NeedsStyleTraversal(element))
@@ -762,69 +773,13 @@ namespace UnityEngine.UIElements
             var matches = NoAllocHelpers.CreateSpan(matchingSelectors);
             SpanSort.Sort(matches, StyleSelectorMatch.RefComparison);
 
-            Int64 matchingRulesHash = element.typeNameId;
-            // Let current DPI contribute to the hash so cache is invalidated when this changes
-            matchingRulesHash = (matchingRulesHash * 397) ^ currentPixelsPerPoint.GetHashCode();
-
-            int oldVariablesHash = m_StyleMatchingContext.variableContext.GetVariableHash();
-            int customPropertiesCount = 0;
-            for (int i = 0; i < matches.Length; i++)
-            {
-                customPropertiesCount += matches[i].complexSelector.rule.customPropertiesCount;
-            }
-
-            if (customPropertiesCount > 0)
-            {
-                // Element defines new variables, add the parents variables at the beginning of the processing context
-                m_ProcessVarContext.AddInitialRange(m_StyleMatchingContext.variableContext);
-            }
-
-            for (int i = 0; i < matches.Length; i++)
-            {
-                // UUM-87950 Don't use rule.GetHashCode() as it isn't defined on the class and
-                // falls back on the base Object.GetHashCode() which have been seen to return the
-                // same value for different rules across scene changes. The rule index is a good
-                // alternate unique identifier for the rule.
-
-                ref readonly var match = ref matches[i];
-                var sheet = match.sheet;
-                var ruleIndex = match.complexSelector.ruleIndex;
-                var specificity = match.complexSelector.specificity;
-                matchingRulesHash = (matchingRulesHash * 397) ^ sheet.contentHash;
-                matchingRulesHash = (matchingRulesHash * 397) ^ ruleIndex;
-                matchingRulesHash = (matchingRulesHash * 397) ^ specificity;
-
-                var rule = match.complexSelector.rule;
-                if (rule.customPropertiesCount > 0)
-                {
-                    ProcessMatchedVariables(sheet, rule, match.tier);
-                }
-            }
+            Int64 matchingRulesHash = ComputeMatchingRulesHash(element, matches, out var variableContext);
+            m_StyleMatchingContext.variableContext = variableContext;
+            element.variableContext = variableContext;
+            if (StyleInvalidationSettings.s_VerifyInvalidation)
+                RecordMatch(element, matchingRulesHash);
 
             var parent = element.hierarchy.parent;
-            int inheritedStyleHash = parent?.inheritedStylesHash ?? 0;
-            matchingRulesHash = (matchingRulesHash * 397) ^ inheritedStyleHash;
-
-            int variablesHash = oldVariablesHash;
-            if (customPropertiesCount > 0)
-            {
-                variablesHash = m_ProcessVarContext.GetVariableHash();
-            }
-            matchingRulesHash = (matchingRulesHash * 397) ^ variablesHash;
-
-            if (oldVariablesHash != variablesHash)
-            {
-                StyleVariableContext ctx;
-                if (!StyleCache.TryGetValue(variablesHash, out ctx))
-                {
-                    ctx = new StyleVariableContext(m_ProcessVarContext);
-                    StyleCache.SetValue(variablesHash, ctx);
-                }
-
-                m_StyleMatchingContext.variableContext = ctx;
-            }
-            element.variableContext = m_StyleMatchingContext.variableContext;
-            m_ProcessVarContext.Clear();
 
             // Re-resolve when a cached style's baked-in asset EntityIds were destroyed (e.g. an Addressables
             // bundle unloaded) so the reloaded asset replaces the stale, now-invalid reference.
@@ -863,6 +818,228 @@ namespace UnityEngine.UIElements
                     m_ProcessVarContext.Add(sv);
                 }
             }
+        }
+
+        // Hash of the rules matched by an element, and the variable context it gets, given the parent's variable
+        // context in m_StyleMatchingContext. matches must be sorted.
+        Int64 ComputeMatchingRulesHash(VisualElement element, ReadOnlySpan<StyleSelectorMatch> matches, out StyleVariableContext variableContext)
+        {
+            Int64 matchingRulesHash = element.typeNameId;
+            // Let current DPI contribute to the hash so cache is invalidated when this changes
+            matchingRulesHash = (matchingRulesHash * 397) ^ currentPixelsPerPoint.GetHashCode();
+
+            variableContext = m_StyleMatchingContext.variableContext;
+            int oldVariablesHash = variableContext.GetVariableHash();
+            int customPropertiesCount = 0;
+            for (int i = 0; i < matches.Length; i++)
+            {
+                customPropertiesCount += matches[i].complexSelector.rule.customPropertiesCount;
+            }
+
+            if (customPropertiesCount > 0)
+            {
+                // Element defines new variables, add the parents variables at the beginning of the processing context
+                m_ProcessVarContext.AddInitialRange(variableContext);
+            }
+
+            for (int i = 0; i < matches.Length; i++)
+            {
+                // UUM-87950 Don't use rule.GetHashCode() as it isn't defined on the class and
+                // falls back on the base Object.GetHashCode() which have been seen to return the
+                // same value for different rules across scene changes. The rule index is a good
+                // alternate unique identifier for the rule.
+
+                ref readonly var match = ref matches[i];
+                var sheet = match.sheet;
+                var ruleIndex = match.complexSelector.ruleIndex;
+                var specificity = match.complexSelector.specificity;
+                matchingRulesHash = (matchingRulesHash * 397) ^ sheet.contentHash;
+                matchingRulesHash = (matchingRulesHash * 397) ^ ruleIndex;
+                matchingRulesHash = (matchingRulesHash * 397) ^ specificity;
+
+                var rule = match.complexSelector.rule;
+                if (rule.customPropertiesCount > 0)
+                {
+                    ProcessMatchedVariables(sheet, rule, match.tier);
+                }
+            }
+
+            var parent = element.hierarchy.parent;
+            int inheritedStyleHash = parent?.inheritedStylesHash ?? 0;
+            matchingRulesHash = (matchingRulesHash * 397) ^ inheritedStyleHash;
+
+            int variablesHash = oldVariablesHash;
+            if (customPropertiesCount > 0)
+            {
+                variablesHash = m_ProcessVarContext.GetVariableHash();
+            }
+            matchingRulesHash = (matchingRulesHash * 397) ^ variablesHash;
+
+            if (oldVariablesHash != variablesHash)
+            {
+                if (!StyleCache.TryGetValue(variablesHash, out variableContext))
+                {
+                    variableContext = new StyleVariableContext(m_ProcessVarContext);
+                    StyleCache.SetValue(variablesHash, variableContext);
+                }
+            }
+            m_ProcessVarContext.Clear();
+
+            return matchingRulesHash;
+        }
+
+        // StyleInvalidationSettings.s_VerifyInvalidation state.
+        // The hash of each element's last re-match is recorded rather than read back from computedStyle, because
+        // SetComputedStyle keeps the previous matchingRulesHash when the newly resolved values are equal.
+        private sealed class RecordedMatch
+        {
+            public Int64 matchingRulesHash;
+        }
+
+        private const int k_MaxLoggedVerificationFailures = 10;
+        private ConditionalWeakTable<VisualElement, RecordedMatch> m_RecordedMatches;
+        private StyleMatchingContext m_VerifyMatchingContext;
+        private HashSet<VisualElement> m_VerifySkippedElements;
+        private bool m_IsVerifyingInvalidation;
+        private int m_VerifySkipDepth;
+        private int m_VerifyFailureCount;
+
+        private void RecordMatch(VisualElement element, Int64 matchingRulesHash)
+        {
+            m_RecordedMatches ??= new ConditionalWeakTable<VisualElement, RecordedMatch>();
+            m_RecordedMatches.GetOrCreateValue(element).matchingRulesHash = matchingRulesHash;
+        }
+
+        // Re-matches the whole tree after a pass and checks that every element holds what a full re-match gives.
+        // Runs TraverseRecursive so that subclasses (UI Builder) set up the same matching context, but with a
+        // separate context that doesn't write pseudo masks and without applying any style.
+        private void VerifyInvalidation(VisualElement root)
+        {
+            // Changes queued during the pass are applied by the next update: skip those elements and their subtree.
+            if (m_ApplyStyleUpdateList.Count > 0)
+            {
+                m_VerifySkippedElements ??= new HashSet<VisualElement>();
+                foreach (var change in m_ApplyStyleUpdateList)
+                    m_VerifySkippedElements.Add(change.element);
+            }
+
+            m_VerifyMatchingContext ??= new StyleMatchingContext(applyPseudoMasks: false);
+            var styleMatchingContext = m_StyleMatchingContext;
+            m_StyleMatchingContext = m_VerifyMatchingContext;
+            m_IsVerifyingInvalidation = true;
+            m_VerifyFailureCount = 0;
+            try
+            {
+                base.Traverse(root);
+            }
+            finally
+            {
+                m_IsVerifyingInvalidation = false;
+                m_VerifySkipDepth = 0;
+                m_VerifySkippedElements?.Clear();
+                m_VerifyMatchingContext.Reset();
+                m_TempMatchResults.Clear();
+                m_StyleMatchingContext = styleMatchingContext;
+            }
+
+            if (m_VerifyFailureCount > k_MaxLoggedVerificationFailures)
+                Debug.LogError($"Style invalidation verification: {m_VerifyFailureCount - k_MaxLoggedVerificationFailures} more mismatching elements not logged.");
+        }
+
+        private void VerifyRecursive(VisualElement element, int depth)
+        {
+            bool skip = m_VerifySkipDepth > 0 || (m_VerifySkippedElements != null && m_VerifySkippedElements.Contains(element));
+
+            int originalStyleSheetCount = m_StyleMatchingContext.styleSheetCount;
+            var elementSheets = element.styleSheetList;
+            if (elementSheets != null)
+            {
+                for (var i = 0; i < elementSheets.Count; i++)
+                {
+                    m_StyleMatchingContext.AddStyleSheet(elementSheets[i]);
+                }
+            }
+
+            var originalVariableContext = m_StyleMatchingContext.variableContext;
+            if (!skip)
+            {
+                m_StyleMatchingContext.currentElement = element;
+                StyleSelectorHelper<TStyleProfiler>.FindMatches(m_StyleMatchingContext, m_TempMatchResults, originalStyleSheetCount - 1);
+                var matches = NoAllocHelpers.CreateSpan(m_TempMatchResults);
+                SpanSort.Sort(matches, StyleSelectorMatch.RefComparison);
+                var expectedHash = ComputeMatchingRulesHash(element, matches, out var expectedVariableContext);
+                m_StyleMatchingContext.currentElement = null;
+                m_TempMatchResults.Clear();
+                CheckVerifiedElement(element, expectedHash, expectedVariableContext);
+            }
+            else
+            {
+                m_VerifySkipDepth++;
+            }
+
+            // Descendants are checked against what this element holds, so a missed element is reported once,
+            // rather than again for every descendant that inherits from it.
+            m_StyleMatchingContext.variableContext = element.variableContext;
+            m_StyleMatchingContext.ancestorFilter.PushElement(element);
+
+            Recurse(element, depth);
+
+            m_StyleMatchingContext.ancestorFilter.PopElement();
+            if (skip)
+                m_VerifySkipDepth--;
+
+            m_StyleMatchingContext.variableContext = originalVariableContext;
+            if (m_StyleMatchingContext.styleSheetCount > originalStyleSheetCount)
+            {
+                m_StyleMatchingContext.RemoveStyleSheetRange(originalStyleSheetCount, m_StyleMatchingContext.styleSheetCount - originalStyleSheetCount);
+            }
+        }
+
+        private void CheckVerifiedElement(VisualElement element, Int64 expectedHash, StyleVariableContext expectedVariableContext)
+        {
+            // Elements not re-matched since verification was enabled have nothing to compare against.
+            if (m_RecordedMatches == null || !m_RecordedMatches.TryGetValue(element, out var recorded))
+                return;
+
+            string reason = null;
+            if (recorded.matchingRulesHash != expectedHash)
+                reason = $"matchingRulesHash is {recorded.matchingRulesHash} but a full re-match gives {expectedHash}";
+
+            int variableHash = element.variableContext.GetVariableHash();
+            int expectedVariableHash = expectedVariableContext.GetVariableHash();
+            if (variableHash != expectedVariableHash)
+            {
+                var variableReason = $"variableContext hash is {variableHash} but a full re-match gives {expectedVariableHash}";
+                reason = reason == null ? variableReason : reason + "; " + variableReason;
+            }
+
+            if (reason == null)
+                return;
+
+            StyleInvalidationSettings.verificationFailureCount++;
+            if (++m_VerifyFailureCount <= k_MaxLoggedVerificationFailures)
+                Debug.LogError($"Style invalidation verification failed for {GetElementPath(element)}: {reason}. The element was not re-matched after a change that affects it.");
+        }
+
+        private static string GetElementPath(VisualElement element)
+        {
+            var path = new List<VisualElement>();
+            for (var current = element; current != null; current = current.hierarchy.parent)
+                path.Add(current);
+
+            var builder = new StringBuilder();
+            for (int i = path.Count - 1; i >= 0; i--)
+            {
+                var current = path[i];
+                builder.Append(current.typeName);
+                if (!string.IsNullOrEmpty(current.name))
+                    builder.Append('#').Append(current.name);
+                foreach (var className in current.GetClasses())
+                    builder.Append('.').Append(className);
+                if (i > 0)
+                    builder.Append(" > ");
+            }
+            return builder.ToString();
         }
     }
 }
