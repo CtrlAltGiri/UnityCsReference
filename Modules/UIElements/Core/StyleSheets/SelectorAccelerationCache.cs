@@ -266,6 +266,9 @@ unsafe struct SelectorAccelerationCacheEntry
     // For reverse lookup
     internal StyleSheet ownerStyleSheet;
 
+    // Managed side table built with this entry (same m_BuildId); never read by native code.
+    internal StyleInvalidationData invalidationData;
+
     // Used for early rejection of lookups
     internal int nonEmptyTablesMask
     {
@@ -280,6 +283,7 @@ unsafe struct SelectorAccelerationCacheEntry
             UnsafeUtility.FreeTracked(m_Core, SelectorAccelerationCache.s_MemoryLabel);
             m_Core = null;
         }
+        invalidationData = null;
     }
 
     // Monotonically increasing id stamped onto each freshly allocated entry, so AreSame can
