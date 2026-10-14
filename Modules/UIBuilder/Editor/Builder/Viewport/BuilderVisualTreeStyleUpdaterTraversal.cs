@@ -66,14 +66,9 @@ namespace Unity.UI.Builder
             return documentRef != null && documentRef.TryGetTarget(out var document) && document != null && element == document && document.styleSheets.count != 0;
         }
 
-        public override void TraverseRecursive(VisualElement element, int depth)
+        // The base traversal decides which elements are visited and restyled; this only swaps the matching context.
+        protected override void TraverseStyleScope(VisualElement element, int depth)
         {
-            // Skip if element is neither dirty nor ancestor of dirty
-            if (!NeedsStyleTraversal(element))
-            {
-                return;
-            }
-
             // In order to ensure that only the selected preview theme is applied to the document content in the viewport,
             // we clear the current style context to prevent the document element from inheriting from the actual Unity Editor theme.
             bool shouldClearStyleContext = ShouldClearStyleContext(m_DocumentElement, element) || ShouldClearStyleContext(m_PreviewDocumentElement, element);
@@ -84,7 +79,7 @@ namespace Unity.UI.Builder
             }
             try
             {
-                base.TraverseRecursive(element, depth);
+                base.TraverseStyleScope(element, depth);
             }
             finally
             {
