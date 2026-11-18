@@ -564,7 +564,7 @@ namespace UnityEngine.UIElements
         }
 
         // Whether the traversal has anything to do on element or below it.
-        protected bool NeedsStyleTraversal(VisualElement element)
+        private bool NeedsStyleTraversal(VisualElement element)
         {
             if (element.styleDirtyFlags != StyleDirtyFlags.None || element.stylesAncestorOfDirty || m_ActivePendingSets.Count > 0)
                 return true;
@@ -589,28 +589,44 @@ namespace UnityEngine.UIElements
             return false;
         }
 
-        public override void TraverseRecursive(VisualElement element, int depth)
+        // What the traversal does with a visited element and passes on to its descendants.
+        private struct RestyleDecision
         {
-            if (!NeedsStyleTraversal(element))
-                return;
+            // Re-match the element.
+            public bool restyle;
+            // Re-match the element and all of its descendants.
+            public bool restyleSubtree;
+            // Matched against the descendants while they are traversed, unless the whole subtree is re-matched.
+            public PendingInvalidationSet pendingSet;
+            public PseudoStates previousTriggerPseudoMask;
+            public PseudoStates previousDependencyPseudoMask;
+            // Set for a Self re-match of an initialized element: lets CompleteRestyle tell whether
+            // what the children inherit changed.
+            public bool checkInheritedChange;
+            public StyleDataRef<InheritedData> previousInheritedData;
+            public StyleVariableContext previousVariableContext;
+        }
+
+        // Decides from the element's flags, its parent's flags and the active pending sets whether the element
+        // is re-matched, and prepares its flags and pseudo masks accordingly.
+        private RestyleDecision DecideRestyle(VisualElement element)
+        {
+            var decision = new RestyleDecision();
 
             // Subtree dirtiness is pushed down one level at a time: children check their parent's flag.
             var flags = element.styleDirtyFlags;
             var parent = element.hierarchy.parent;
-            bool isSubtreeDirty = (flags & StyleDirtyFlags.Subtree) != 0 ||
+            decision.restyleSubtree = (flags & StyleDirtyFlags.Subtree) != 0 ||
                 (parent != null && (parent.styleDirtyFlags & StyleDirtyFlags.Subtree) != 0);
 
-            PendingInvalidationSet pendingSet = null;
-            if ((flags & StyleDirtyFlags.HasPendingSet) != 0 && !m_PendingSets.Remove(element, out pendingSet))
-                isSubtreeDirty = true; // Set lost by an aborted traversal.
+            if ((flags & StyleDirtyFlags.HasPendingSet) != 0 && !m_PendingSets.Remove(element, out decision.pendingSet))
+                decision.restyleSubtree = true; // Set lost by an aborted traversal.
 
             // An element matching an ancestor's pending set needs to be re-matched itself only: selectors
             // keyed on the changed ancestor feature have it as their subject.
-            bool isDirty = isSubtreeDirty || (flags & StyleDirtyFlags.Self) != 0 || MatchesActivePendingSets(element);
+            decision.restyle = decision.restyleSubtree || (flags & StyleDirtyFlags.Self) != 0 || MatchesActivePendingSets(element);
 
-            PseudoStates previousTriggerPseudoMask = PseudoStates.None;
-            PseudoStates previousDependencyPseudoMask = PseudoStates.None;
-            if (isSubtreeDirty)
+            if (decision.restyleSubtree)
             {
                 element.styleDirtyFlags = StyleDirtyFlags.Subtree; // Propagate to children
                 unsafe
@@ -620,7 +636,7 @@ namespace UnityEngine.UIElements
                     selectorData.dependencyPseudoMask = PseudoStates.None;
                 }
             }
-            else if (isDirty)
+            else if (decision.restyle)
             {
                 // Descendants that are not re-matched contributed bits to these masks and still rely on them,
                 // so keep them. Bits of selectors that stopped matching only cause one extra Subtree restyle on
@@ -628,15 +644,105 @@ namespace UnityEngine.UIElements
                 unsafe
                 {
                     ref var selectorData = ref *element.selectorDataPtr;
-                    previousTriggerPseudoMask = selectorData.triggerPseudoMask;
-                    previousDependencyPseudoMask = selectorData.dependencyPseudoMask;
+                    decision.previousTriggerPseudoMask = selectorData.triggerPseudoMask;
+                    decision.previousDependencyPseudoMask = selectorData.dependencyPseudoMask;
+                }
+
+                if (element.styleInitialized)
+                {
+                    decision.checkInheritedChange = true;
+                    decision.previousInheritedData = element.computedStyle.inheritedData.Acquire();
+                    decision.previousVariableContext = element.variableContext;
                 }
             }
 
-            // Needed to tell whether a Self re-match changed what the children inherit.
-            bool checkInheritedChange = isDirty && !isSubtreeDirty && element.styleInitialized;
-            var previousInheritedData = checkInheritedChange ? element.computedStyle.inheritedData.Acquire() : default;
-            var previousVariableContext = element.variableContext;
+            return decision;
+        }
+
+        // Called right after FindMatches on a re-matched element.
+        private static void RestorePreviousPseudoMasks(VisualElement element, in RestyleDecision decision)
+        {
+            if (decision.restyleSubtree)
+                return;
+
+            unsafe
+            {
+                ref var selectorData = ref *element.selectorDataPtr;
+                selectorData.triggerPseudoMask |= decision.previousTriggerPseudoMask;
+                selectorData.dependencyPseudoMask |= decision.previousDependencyPseudoMask;
+            }
+        }
+
+        // Called once a re-matched element has its new computed style: the children of a Self re-match
+        // only need restyling if what they inherit changed.
+        private static void CompleteRestyle(VisualElement element, ref RestyleDecision decision)
+        {
+            if (decision.restyleSubtree)
+                return;
+
+            bool inheritedChanged = !decision.checkInheritedChange ||
+                element.computedStyle.inheritedData != decision.previousInheritedData ||
+                !ReferenceEquals(element.variableContext, decision.previousVariableContext);
+
+            if (decision.checkInheritedChange)
+            {
+                decision.previousInheritedData.Release();
+                decision.previousInheritedData = default;
+                decision.checkInheritedChange = false;
+            }
+
+            if (inheritedChanged)
+            {
+                decision.restyleSubtree = true;
+                element.styleDirtyFlags = StyleDirtyFlags.Subtree;
+            }
+        }
+
+        // Pushes what the element passes on to its descendants before they are traversed.
+        private void EnterDescendants(VisualElement element, ref RestyleDecision decision)
+        {
+            // A subtree re-match covers every descendant the pending set could select.
+            if (decision.restyleSubtree && decision.pendingSet != null)
+            {
+                PendingInvalidationSet.Release(decision.pendingSet);
+                decision.pendingSet = null;
+            }
+
+            m_StyleMatchingContext.ancestorFilter.PushElement(element);
+            if (decision.pendingSet != null)
+                m_ActivePendingSets.Add(decision.pendingSet);
+        }
+
+        // Pops what EnterDescendants pushed and clears the element's flags.
+        private void ExitDescendants(VisualElement element, ref RestyleDecision decision)
+        {
+            if (decision.pendingSet != null)
+            {
+                m_ActivePendingSets.RemoveAt(m_ActivePendingSets.Count - 1);
+                PendingInvalidationSet.Release(decision.pendingSet);
+                decision.pendingSet = null;
+            }
+            m_StyleMatchingContext.ancestorFilter.PopElement();
+
+            // Clear flags after traversing children (so children can see parent's dirty state during traversal)
+            element.styleDirtyFlags = StyleDirtyFlags.None;
+            element.stylesAncestorOfDirty = false;
+        }
+
+        // Which elements are visited and restyled is decided here only. Subclasses that need to adjust
+        // the matching context around an element override TraverseVisitedElement instead.
+        public sealed override void TraverseRecursive(VisualElement element, int depth)
+        {
+            if (!NeedsStyleTraversal(element))
+                return;
+
+            TraverseVisitedElement(element, depth);
+        }
+
+        // Restyles an element the traversal has to visit, if needed, then traverses its children.
+        protected virtual void TraverseVisitedElement(VisualElement element, int depth)
+        {
+            var decision = DecideRestyle(element);
 
             int originalStyleSheetCount = m_StyleMatchingContext.styleSheetCount;
             var elementSheets = element.styleSheetList;
@@ -653,19 +759,11 @@ namespace UnityEngine.UIElements
             // at the matched custom styles won't suffice.
             var originalVariableContext = m_StyleMatchingContext.variableContext;
             int originalCustomStyleCount = element.computedStyle.customPropertiesCount;
-            if (isDirty)
+            if (decision.restyle)
             {
                 m_StyleMatchingContext.currentElement = element;
                 StyleSelectorHelper<TStyleProfiler>.FindMatches(m_StyleMatchingContext, m_TempMatchResults, originalStyleSheetCount - 1);
-                if (!isSubtreeDirty)
-                {
-                    unsafe
-                    {
-                        ref var selectorData = ref *element.selectorDataPtr;
-                        selectorData.triggerPseudoMask |= previousTriggerPseudoMask;
-                        selectorData.dependencyPseudoMask |= previousDependencyPseudoMask;
-                    }
-                }
+                RestorePreviousPseudoMasks(element, decision);
                 var newStyle = ProcessMatchedRules(element, m_TempMatchResults);
                 newStyle.Acquire();
 
@@ -716,27 +814,11 @@ namespace UnityEngine.UIElements
                 m_StyleMatchingContext.currentElement = null;
                 m_TempMatchResults.Clear();
 
-                // Children of a Self re-match only need restyling if what they inherit changed.
-                if (!isSubtreeDirty && (!checkInheritedChange ||
-                                        element.computedStyle.inheritedData != previousInheritedData ||
-                                        !ReferenceEquals(element.variableContext, previousVariableContext)))
-                {
-                    isSubtreeDirty = true;
-                    element.styleDirtyFlags = StyleDirtyFlags.Subtree;
-                }
+                CompleteRestyle(element, ref decision);
             }
-
-            if (checkInheritedChange)
-                previousInheritedData.Release();
             else
             {
                 m_StyleMatchingContext.variableContext = element.variableContext;
-            }
-
-            if (isSubtreeDirty && pendingSet != null)
-            {
-                PendingInvalidationSet.Release(pendingSet);
-                pendingSet = null;
             }
 
             // Need to send the custom styles event after the inheritance is resolved because an element
@@ -744,28 +826,15 @@ namespace UnityEngine.UIElements
             // Accumulate elements that need the event; dispatch at the end to support future native code path.
             // The count gate applies to component [StyleProperty] handlers like everyone else: they only
             // sync when the element's computed style has (or had) custom properties to read.
-            if (isDirty && (originalCustomStyleCount > 0 || element.computedStyle.customPropertiesCount > 0) &&
+            if (decision.restyle && (originalCustomStyleCount > 0 || element.computedStyle.customPropertiesCount > 0) &&
                 element.HasSelfEventInterests(CustomStyleResolvedEvent.EventCategory))
             {
                 m_CustomStyleResolvedElements.Add(element);
             }
 
-            m_StyleMatchingContext.ancestorFilter.PushElement(element);
-            if (pendingSet != null)
-                m_ActivePendingSets.Add(pendingSet);
-
+            EnterDescendants(element, ref decision);
             Recurse(element, depth);
-
-            if (pendingSet != null)
-            {
-                m_ActivePendingSets.RemoveAt(m_ActivePendingSets.Count - 1);
-                PendingInvalidationSet.Release(pendingSet);
-            }
-            m_StyleMatchingContext.ancestorFilter.PopElement();
-
-            // Clear flags after traversing children (so children can see parent's dirty state during traversal)
-            element.styleDirtyFlags = StyleDirtyFlags.None;
-            element.stylesAncestorOfDirty = false;
+            ExitDescendants(element, ref decision);
 
             m_StyleMatchingContext.variableContext = originalVariableContext;
             if (m_StyleMatchingContext.styleSheetCount > originalStyleSheetCount)
