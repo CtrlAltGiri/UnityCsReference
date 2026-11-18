@@ -158,6 +158,20 @@ namespace UnityEngine.UIElements
             }
         }
 
+        public void OnStyleFeaturesChanged(VisualElement ve, VersionChangeType versionChangeType, ReadOnlySpan<int> changedIds)
+        {
+            visualTreeEditorUpdater.OnVersionChanged(ve, versionChangeType);
+
+            for (int i = 0; i < (int)VisualTreeUpdatePhase.Count; i++)
+            {
+                var updater = m_UpdaterArray[i];
+                if (updater is IStyleFeatureChangeReceiver receiver)
+                    receiver.OnStyleFeaturesChanged(ve, versionChangeType, changedIds);
+                else
+                    updater?.OnVersionChanged(ve, versionChangeType);
+            }
+        }
+
         public void DirtyStyleSheets()
         {
             var styleUpdater = m_UpdaterArray[VisualTreeUpdatePhase.Styles] as VisualTreeStyleUpdater;
