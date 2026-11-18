@@ -328,6 +328,8 @@ namespace UnityEngine.UIElements
         private readonly Stack<PendingInvalidationSet> m_PendingSetPool = new Stack<PendingInvalidationSet>();
         // Sets of the ancestors on the current traversal path, pushed and popped with the ancestor filter.
         private readonly List<PendingInvalidationSet> m_ActivePendingSets = new List<PendingInvalidationSet>();
+        // Previous inherited data of the element being re-matched as Self. Released before its children are visited.
+        private StyleDataRef<InheritedData> m_PreviousInheritedData;
 
         StyleMatchingContext m_StyleMatchingContext = new StyleMatchingContext(applyPseudoMasks: true);
         StylePropertyReader m_StylePropertyReader = new StylePropertyReader();
@@ -362,6 +364,7 @@ namespace UnityEngine.UIElements
                     // (UUM-153734), so reset here; this relies on nothing catching mid-traversal.
                     m_StyleMatchingContext.Reset();
                     m_TempMatchResults.Clear();
+                    m_PreviousInheritedData.SafeRelease();
 
                     // Sets of elements the traversal didn't reach (detached, or aborted by an exception) are dropped.
                     // An element still flagged HasPendingSet is then restyled as Subtree on the next update.
@@ -584,8 +587,12 @@ namespace UnityEngine.UIElements
                     previousDependencyPseudoMask = selectorData.dependencyPseudoMask;
                 }
             }
-            int previousInheritedStylesHash = element.inheritedStylesHash;
-            int previousVariableHash = isDirty && !isSubtreeDirty ? element.variableContext.GetVariableHash() : 0;
+            // A Self re-match keeps a reference to its previous inherited data so it can be compared by value once the
+            // new style is applied. Holding it forces copy-on-write, so applying the new style can't overwrite it in place.
+            bool comparePreviousInheritance = isDirty && !isSubtreeDirty && element.styleInitialized;
+            if (comparePreviousInheritance)
+                m_PreviousInheritedData = element.computedStyle.inheritedData.Acquire();
+            var previousVariableContext = element.variableContext;
 
             int originalStyleSheetCount = m_StyleMatchingContext.styleSheetCount;
             var elementSheets = element.styleSheetList;
@@ -665,12 +672,20 @@ namespace UnityEngine.UIElements
                 m_StyleMatchingContext.currentElement = null;
                 m_TempMatchResults.Clear();
 
-                // Children of a Self re-match only follow when what they inherit changed.
-                if (!isSubtreeDirty && (element.inheritedStylesHash != previousInheritedStylesHash ||
-                                        element.variableContext.GetVariableHash() != previousVariableHash))
+                // Children of a Self re-match only follow when what they inherit changed: the inherited data by value
+                // (not by inheritedStylesHash) and the variable context by reference. This runs after transitions were
+                // started and cancelled, so it compares the values actually applied this frame.
+                if (!isSubtreeDirty)
                 {
-                    isSubtreeDirty = true;
-                    element.styleDirtyFlags = StyleDirtyFlags.Subtree;
+                    bool inheritanceChanged = !comparePreviousInheritance ||
+                        element.computedStyle.inheritedData != m_PreviousInheritedData ||
+                        !ReferenceEquals(element.variableContext, previousVariableContext);
+                    m_PreviousInheritedData.SafeRelease();
+                    if (inheritanceChanged)
+                    {
+                        isSubtreeDirty = true;
+                        element.styleDirtyFlags = StyleDirtyFlags.Subtree;
+                    }
                 }
             }
             else
